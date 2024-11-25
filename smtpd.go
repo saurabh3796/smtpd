@@ -16,7 +16,6 @@ import (
 	"net"
 	"os"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -241,18 +240,18 @@ func (srv *Server) Serve(ln net.Listener) error {
 			session := srv.newSession(conn)
 			atomic.AddInt32(&srv.openSessions, 1)
 			session.serve()
-			logGoroutineInfo("Finished serving session")
+			// logGoroutineInfo("Finished serving session")
 		}()
 	}
 
 }
 
 // logGoroutineInfo logs information about the goroutine and its actions
-func logGoroutineInfo(message string) {
-	buf := make([]byte, 1024)
-	runtime.Stack(buf, false)
-	log.Printf("Goroutine Info: %s\n%s", message, buf)
-}
+// func logGoroutineInfo(message string) {
+// 	buf := make([]byte, 1024)
+// 	runtime.Stack(buf, false)
+// 	log.Printf("Goroutine Info: %s\n%s", message, buf)
+// }
 
 type session struct {
 	srv           *Server
