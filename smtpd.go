@@ -120,8 +120,9 @@ type Server struct {
 	mu           sync.Mutex
 	shutdownChan chan struct{} // let the sessions know we are shutting down
 
-	XClientAllowed []string // List of XCLIENT allowed IP addresses
-	maxGoroutines  int
+	XClientAllowed   []string // List of XCLIENT allowed IP addresses
+	maxGoroutines    int
+	activeGoroutines int32 // Track active goroutines
 }
 
 const defaultMaxGoroutines = 10
@@ -213,6 +214,7 @@ func (srv *Server) Serve(ln net.Listener) error {
 	for {
 		sem <- struct{}{} // Blocks if maxConcurrentGoroutines is reached
 		// if we are shutting down, don't accept new connections
+		log.Printf("Active goroutines: %d", atomic.LoadInt32(&srv.activeGoroutines))
 		select {
 		case <-srv.getShutdownChan():
 			return ErrServerClosed
@@ -229,7 +231,12 @@ func (srv *Server) Serve(ln net.Listener) error {
 
 		// go session.serve()
 		go func() {
-			defer func() { <-sem }() // Release the slot in the semaphore once the goroutine is done
+			atomic.AddInt32(&srv.activeGoroutines, 1)
+			defer func() {
+				<-sem
+				atomic.AddInt32(&srv.activeGoroutines, -1)
+				log.Printf("Goroutine finished, active goroutines: %d", atomic.LoadInt32(&srv.activeGoroutines))
+			}() // Release the slot in the semaphore once the goroutine is done
 			session := srv.newSession(conn)
 			atomic.AddInt32(&srv.openSessions, 1)
 			session.serve()
