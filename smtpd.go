@@ -192,6 +192,7 @@ func (srv *Server) ListenAndServe(numberOfGoroutines int) error {
 
 // Serve creates a new SMTP session after a network connection is established.
 func (srv *Server) Serve(ln net.Listener, ng int) error {
+	log.Println("SMTP server listening on", ln.Addr())
 	if atomic.LoadInt32(&srv.inShutdown) != 0 {
 		return ErrServerClosed
 	}
@@ -217,12 +218,13 @@ func (srv *Server) Serve(ln net.Listener, ng int) error {
 
 		session := srv.newSession(conn)
 		atomic.AddInt32(&srv.openSessions, 1)
-		go session.serve()
+		// go session.serve()
 		go func() {
 			defer func() { <-sem }() // Release the slot in the semaphore once the goroutine is done
 			session.serve()
 		}()
 	}
+
 }
 
 type session struct {
