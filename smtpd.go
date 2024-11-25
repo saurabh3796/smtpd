@@ -50,9 +50,9 @@ var ErrServerClosed = errors.New("Server has been closed")
 // ListenAndServe listens on the TCP network address addr
 // and then calls Serve with handler to handle requests
 // on incoming connections.
-func ListenAndServe(addr string, handler Handler, appname string, hostname string) error {
+func ListenAndServe(addr string, handler Handler, appname string, hostname string, numberOfGoroutines int) error {
 	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
-	return srv.ListenAndServe()
+	return srv.ListenAndServe(numberOfGoroutines)
 }
 
 // ListenAndServeTLS listens on the TCP network address addr
