@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,25 +47,34 @@ type HandlerRcpt func(remoteAddr net.Addr, from string, to string) bool
 type AuthHandler func(remoteAddr net.Addr, mechanism string, username []byte, password []byte, shared []byte) (bool, error)
 
 var ErrServerClosed = errors.New("Server has been closed")
+var sem chan struct{}
 
 // ListenAndServe listens on the TCP network address addr
 // and then calls Serve with handler to handle requests
 // on incoming connections.
 func ListenAndServe(addr string, handler Handler, appname string, hostname string, numberOfGoroutines int) error {
-	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
-	return srv.ListenAndServe(numberOfGoroutines)
+	if numberOfGoroutines <= 0 {
+		numberOfGoroutines = defaultMaxGoroutines
+	}
+	sem = make(chan struct{}, numberOfGoroutines)
+	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname, maxGoroutines: numberOfGoroutines}
+	return srv.ListenAndServe()
 }
 
 // ListenAndServeTLS listens on the TCP network address addr
 // and then calls Serve with handler to handle requests
 // on incoming connections. Connections may be upgraded to TLS if the client requests it.
 func ListenAndServeTLS(addr string, certFile string, keyFile string, handler Handler, appname string, hostname string, numberOfGoroutines int) error {
+	if numberOfGoroutines <= 0 {
+		numberOfGoroutines = defaultMaxGoroutines
+	}
+	sem = make(chan struct{}, numberOfGoroutines)
 	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
 	err := srv.ConfigureTLS(certFile, keyFile)
 	if err != nil {
 		return err
 	}
-	return srv.ListenAndServe(numberOfGoroutines)
+	return srv.ListenAndServe()
 }
 
 type maxSizeExceededError struct {
@@ -111,7 +121,10 @@ type Server struct {
 	shutdownChan chan struct{} // let the sessions know we are shutting down
 
 	XClientAllowed []string // List of XCLIENT allowed IP addresses
+	maxGoroutines  int
 }
+
+const defaultMaxGoroutines = 10
 
 // ConfigureTLS creates a TLS configuration from certificate and key files.
 func (srv *Server) ConfigureTLS(certFile string, keyFile string) error {
@@ -158,7 +171,7 @@ func (srv *Server) ConfigureTLSWithPassphrase(
 // ListenAndServe listens on the TCP network address srv.Addr and then
 // calls Serve to handle requests on incoming connections.  If
 // srv.Addr is blank, ":25" is used.
-func (srv *Server) ListenAndServe(numberOfGoroutines int) error {
+func (srv *Server) ListenAndServe() error {
 	if atomic.LoadInt32(&srv.inShutdown) != 0 {
 		return ErrServerClosed
 	}
@@ -187,19 +200,18 @@ func (srv *Server) ListenAndServe(numberOfGoroutines int) error {
 	if err != nil {
 		return err
 	}
-	return srv.Serve(ln, numberOfGoroutines)
+	return srv.Serve(ln)
 }
 
 // Serve creates a new SMTP session after a network connection is established.
-func (srv *Server) Serve(ln net.Listener, ng int) error {
+func (srv *Server) Serve(ln net.Listener) error {
 	log.Println("SMTP server listening on", ln.Addr())
 	if atomic.LoadInt32(&srv.inShutdown) != 0 {
 		return ErrServerClosed
 	}
-	var sem = make(chan struct{}, ng)
 	defer ln.Close()
 	for {
-
+		sem <- struct{}{} // Blocks if maxConcurrentGoroutines is reached
 		// if we are shutting down, don't accept new connections
 		select {
 		case <-srv.getShutdownChan():
@@ -207,7 +219,6 @@ func (srv *Server) Serve(ln net.Listener, ng int) error {
 		default:
 		}
 
-		sem <- struct{}{} // Send a message to the semaphore channel to acquire a slot
 		conn, err := ln.Accept()
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
@@ -216,15 +227,23 @@ func (srv *Server) Serve(ln net.Listener, ng int) error {
 			return err
 		}
 
-		session := srv.newSession(conn)
-		atomic.AddInt32(&srv.openSessions, 1)
 		// go session.serve()
 		go func() {
 			defer func() { <-sem }() // Release the slot in the semaphore once the goroutine is done
+			session := srv.newSession(conn)
+			atomic.AddInt32(&srv.openSessions, 1)
 			session.serve()
+			logGoroutineInfo("Finished serving session")
 		}()
 	}
 
+}
+
+// logGoroutineInfo logs information about the goroutine and its actions
+func logGoroutineInfo(message string) {
+	buf := make([]byte, 1024)
+	runtime.Stack(buf, false)
+	log.Printf("Goroutine Info: %s\n%s", message, buf)
 }
 
 type session struct {
