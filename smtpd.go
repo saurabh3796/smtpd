@@ -46,19 +46,28 @@ type HandlerRcpt func(remoteAddr net.Addr, from string, to string) bool
 type AuthHandler func(remoteAddr net.Addr, mechanism string, username []byte, password []byte, shared []byte) (bool, error)
 
 var ErrServerClosed = errors.New("Server has been closed")
+var sem chan struct{}
 
 // ListenAndServe listens on the TCP network address addr
 // and then calls Serve with handler to handle requests
 // on incoming connections.
-func ListenAndServe(addr string, handler Handler, appname string, hostname string) error {
-	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
+func ListenAndServe(addr string, handler Handler, appname string, hostname string, numberOfGoroutines int) error {
+	if numberOfGoroutines <= 0 {
+		numberOfGoroutines = defaultMaxGoroutines
+	}
+	sem = make(chan struct{}, numberOfGoroutines)
+	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname, maxGoroutines: numberOfGoroutines}
 	return srv.ListenAndServe()
 }
 
 // ListenAndServeTLS listens on the TCP network address addr
 // and then calls Serve with handler to handle requests
 // on incoming connections. Connections may be upgraded to TLS if the client requests it.
-func ListenAndServeTLS(addr string, certFile string, keyFile string, handler Handler, appname string, hostname string) error {
+func ListenAndServeTLS(addr string, certFile string, keyFile string, handler Handler, appname string, hostname string, numberOfGoroutines int) error {
+	if numberOfGoroutines <= 0 {
+		numberOfGoroutines = defaultMaxGoroutines
+	}
+	sem = make(chan struct{}, numberOfGoroutines)
 	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
 	err := srv.ConfigureTLS(certFile, keyFile)
 	if err != nil {
@@ -110,8 +119,12 @@ type Server struct {
 	mu           sync.Mutex
 	shutdownChan chan struct{} // let the sessions know we are shutting down
 
-	XClientAllowed []string // List of XCLIENT allowed IP addresses
+	XClientAllowed   []string // List of XCLIENT allowed IP addresses
+	maxGoroutines    int
+	activeGoroutines int32 // Track active goroutines
 }
+
+const defaultMaxGoroutines = 10
 
 // ConfigureTLS creates a TLS configuration from certificate and key files.
 func (srv *Server) ConfigureTLS(certFile string, keyFile string) error {
@@ -162,7 +175,6 @@ func (srv *Server) ListenAndServe() error {
 	if atomic.LoadInt32(&srv.inShutdown) != 0 {
 		return ErrServerClosed
 	}
-
 	if srv.Addr == "" {
 		srv.Addr = ":25"
 	}
@@ -196,10 +208,9 @@ func (srv *Server) Serve(ln net.Listener) error {
 	if atomic.LoadInt32(&srv.inShutdown) != 0 {
 		return ErrServerClosed
 	}
-
 	defer ln.Close()
 	for {
-
+		sem <- struct{}{} // Blocks if maxConcurrentGoroutines is reached
 		// if we are shutting down, don't accept new connections
 		select {
 		case <-srv.getShutdownChan():
@@ -215,11 +226,28 @@ func (srv *Server) Serve(ln net.Listener) error {
 			return err
 		}
 
-		session := srv.newSession(conn)
-		atomic.AddInt32(&srv.openSessions, 1)
-		go session.serve()
+		// go session.serve()
+		go func() {
+			atomic.AddInt32(&srv.activeGoroutines, 1)
+			defer func() {
+				<-sem
+				atomic.AddInt32(&srv.activeGoroutines, -1)
+			}() // Release the slot in the semaphore once the goroutine is done
+			session := srv.newSession(conn)
+			atomic.AddInt32(&srv.openSessions, 1)
+			session.serve()
+			// logGoroutineInfo("Finished serving session")
+		}()
 	}
+
 }
+
+// logGoroutineInfo logs information about the goroutine and its actions
+// func logGoroutineInfo(message string) {
+// 	buf := make([]byte, 1024)
+// 	runtime.Stack(buf, false)
+// 	log.Printf("Goroutine Info: %s\n%s", message, buf)
+// }
 
 type session struct {
 	srv           *Server
