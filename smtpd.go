@@ -58,13 +58,13 @@ func ListenAndServe(addr string, handler Handler, appname string, hostname strin
 // ListenAndServeTLS listens on the TCP network address addr
 // and then calls Serve with handler to handle requests
 // on incoming connections. Connections may be upgraded to TLS if the client requests it.
-func ListenAndServeTLS(addr string, certFile string, keyFile string, handler Handler, appname string, hostname string) error {
+func ListenAndServeTLS(addr string, certFile string, keyFile string, handler Handler, appname string, hostname string, numberOfGoroutines int) error {
 	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
 	err := srv.ConfigureTLS(certFile, keyFile)
 	if err != nil {
 		return err
 	}
-	return srv.ListenAndServe()
+	return srv.ListenAndServe(numberOfGoroutines)
 }
 
 type maxSizeExceededError struct {
@@ -158,11 +158,10 @@ func (srv *Server) ConfigureTLSWithPassphrase(
 // ListenAndServe listens on the TCP network address srv.Addr and then
 // calls Serve to handle requests on incoming connections.  If
 // srv.Addr is blank, ":25" is used.
-func (srv *Server) ListenAndServe() error {
+func (srv *Server) ListenAndServe(numberOfGoroutines int) error {
 	if atomic.LoadInt32(&srv.inShutdown) != 0 {
 		return ErrServerClosed
 	}
-
 	if srv.Addr == "" {
 		srv.Addr = ":25"
 	}
@@ -188,15 +187,15 @@ func (srv *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
-	return srv.Serve(ln)
+	return srv.Serve(ln, numberOfGoroutines)
 }
 
 // Serve creates a new SMTP session after a network connection is established.
-func (srv *Server) Serve(ln net.Listener) error {
+func (srv *Server) Serve(ln net.Listener, ng int) error {
 	if atomic.LoadInt32(&srv.inShutdown) != 0 {
 		return ErrServerClosed
 	}
-
+	var sem = make(chan struct{}, ng)
 	defer ln.Close()
 	for {
 
@@ -207,6 +206,7 @@ func (srv *Server) Serve(ln net.Listener) error {
 		default:
 		}
 
+		sem <- struct{}{} // Send a message to the semaphore channel to acquire a slot
 		conn, err := ln.Accept()
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
@@ -218,6 +218,10 @@ func (srv *Server) Serve(ln net.Listener) error {
 		session := srv.newSession(conn)
 		atomic.AddInt32(&srv.openSessions, 1)
 		go session.serve()
+		go func() {
+			defer func() { <-sem }() // Release the slot in the semaphore once the goroutine is done
+			session.serve()
+		}()
 	}
 }
 
