@@ -68,6 +68,7 @@ func ListenAndServeTLS(addr string, certFile string, keyFile string, handler Han
 	if numberOfGoroutines <= 0 {
 		numberOfGoroutines = defaultMaxGoroutines
 	}
+	log.Println("Number of goroutines: ", numberOfGoroutines)
 	sem = make(chan struct{}, numberOfGoroutines)
 	srv := &Server{Addr: addr, Handler: handler, Appname: appname, Hostname: hostname}
 	err := srv.ConfigureTLS(certFile, keyFile)
